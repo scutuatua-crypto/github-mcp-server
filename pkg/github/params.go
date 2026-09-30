@@ -6,7 +6,7 @@ import (
 	"math"
 	"strconv"
 
-	"github.com/google/go-github/v87/github"
+	"github.com/google/go-github/v89/github"
 	"github.com/google/jsonschema-go/jsonschema"
 )
 
@@ -32,6 +32,26 @@ func OptionalParamOK[T any, A map[string]any](args A, p string) (value T, ok boo
 	// Present and correct type
 	ok = true
 	return
+}
+
+// OptionalNullableStringParam preserves omitted, null, and non-empty string values.
+func OptionalNullableStringParam(args map[string]any, p string) (*string, bool, error) {
+	value, ok := args[p]
+	if !ok {
+		return nil, false, nil
+	}
+	if value == nil {
+		return nil, true, nil
+	}
+
+	stringValue, ok := value.(string)
+	if !ok {
+		return nil, true, fmt.Errorf("parameter %s is not of type string or null, is %T", p, value)
+	}
+	if stringValue == "" {
+		return nil, true, fmt.Errorf("parameter %s must not be empty", p)
+	}
+	return &stringValue, true, nil
 }
 
 // isAcceptedError checks if the error is an accepted error.
@@ -376,7 +396,7 @@ func WithCursorPagination(schema *jsonschema.Schema) *jsonschema.Schema {
 
 	schema.Properties["after"] = &jsonschema.Schema{
 		Type:        "string",
-		Description: "Cursor for pagination. Use the endCursor from the previous page's PageInfo for GraphQL APIs.",
+		Description: "Cursor for pagination. Use the cursor from the previous response.",
 	}
 
 	return schema
@@ -433,6 +453,22 @@ func OptionalCursorPaginationParams(args map[string]any) (CursorPaginationParams
 type CursorPaginationParams struct {
 	PerPage int
 	After   string
+}
+
+type pageInfo struct {
+	HasNextPage     bool   `json:"hasNextPage"`
+	HasPreviousPage bool   `json:"hasPreviousPage"`
+	NextCursor      string `json:"nextCursor,omitempty"`
+	PrevCursor      string `json:"prevCursor,omitempty"`
+}
+
+func buildPageInfo(resp *github.Response) pageInfo {
+	return pageInfo{
+		HasNextPage:     resp.After != "",
+		HasPreviousPage: resp.Before != "",
+		NextCursor:      resp.After,
+		PrevCursor:      resp.Before,
+	}
 }
 
 // ToGraphQLParams converts cursor pagination parameters to GraphQL-specific parameters.

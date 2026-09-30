@@ -1,5 +1,16 @@
 {
+  "_meta": {
+    "ui": {
+      "resourceUri": "ui://github-mcp-server/pr-edit",
+      "visibility": [
+        "model",
+        "app"
+      ]
+    }
+  },
   "annotations": {
+    "idempotentHint": false,
+    "readOnlyHint": false,
     "title": "Edit pull request"
   },
   "description": "Update an existing pull request in a GitHub repository.",

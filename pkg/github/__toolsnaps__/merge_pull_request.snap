@@ -1,5 +1,7 @@
 {
   "annotations": {
+    "idempotentHint": false,
+    "readOnlyHint": false,
     "title": "Merge pull request"
   },
   "description": "Merge a pull request in a GitHub repository.",
@@ -23,6 +25,10 @@
       },
       "commit_title": {
         "description": "Title for merge commit",
+        "type": "string"
+      },
+      "expectedHeadSha": {
+        "description": "The expected SHA of the pull request's HEAD ref",
         "type": "string"
       },
       "merge_method": {

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	ghcontext "github.com/github/github-mcp-server/pkg/context"
+	"github.com/github/github-mcp-server/pkg/inventory"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -84,4 +85,49 @@ func Test_clientSupportsUI_fromContext(t *testing.T) {
 	t.Run("no context or session", func(t *testing.T) {
 		assert.False(t, clientSupportsUI(context.Background(), nil))
 	})
+}
+
+func Test_shouldDeferToForm_featureFlags(t *testing.T) {
+	t.Parallel()
+
+	ctx := ghcontext.WithUISupport(context.Background(), true)
+	args := map[string]any{"owner": "octocat"}
+	formParams := map[string]struct{}{"owner": {}}
+
+	tests := []struct {
+		name         string
+		enabledFlags []inventory.FeatureFlag
+		want         bool
+	}{
+		{
+			name:         "MCP Apps enabled defers to form",
+			enabledFlags: []inventory.FeatureFlag{MCPAppsFeatureFlag},
+			want:         true,
+		},
+		{
+			name: "form deferral disabled executes directly",
+			enabledFlags: []inventory.FeatureFlag{
+				MCPAppsFeatureFlag,
+				MCPAppsDisableFormDeferralFeatureFlag,
+			},
+			want: false,
+		},
+		{
+			name:         "form deferral opt-out does not enable MCP Apps",
+			enabledFlags: []inventory.FeatureFlag{MCPAppsDisableFormDeferralFeatureFlag},
+			want:         false,
+		},
+		{
+			name: "MCP Apps disabled executes directly",
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			deps := BaseDeps{featureChecker: featureCheckerFor(tc.enabledFlags...)}
+			assert.Equal(t, tc.want, shouldDeferToForm(ctx, deps, nil, args, formParams))
+		})
+	}
 }

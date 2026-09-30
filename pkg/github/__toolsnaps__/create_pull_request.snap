@@ -9,6 +9,8 @@
     }
   },
   "annotations": {
+    "idempotentHint": false,
+    "readOnlyHint": false,
     "title": "Open new pull request"
   },
   "description": "Create a new pull request in a GitHub repository.",
@@ -41,6 +43,13 @@
       "repo": {
         "description": "Repository name",
         "type": "string"
+      },
+      "reviewers": {
+        "description": "GitHub usernames or ORG/team-slug team reviewers to request reviews from",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
       },
       "title": {
         "description": "PR title",

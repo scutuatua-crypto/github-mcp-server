@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/github/github-mcp-server/pkg/ifc"
 	"github.com/github/github-mcp-server/pkg/inventory"
+	"github.com/github/github-mcp-server/pkg/sanitize"
 	"github.com/github/github-mcp-server/pkg/scopes"
 	"github.com/github/github-mcp-server/pkg/translations"
 	"github.com/github/github-mcp-server/pkg/utils"
 	"github.com/go-viper/mapstructure/v2"
-	"github.com/google/go-github/v87/github"
+	"github.com/google/go-github/v89/github"
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/shurcooL/githubv4"
@@ -98,7 +100,7 @@ type WithCategoryNoOrder struct {
 func fragmentToDiscussion(fragment NodeFragment) *github.Discussion {
 	return &github.Discussion{
 		Number:    github.Ptr(int(fragment.Number)),
-		Title:     github.Ptr(string(fragment.Title)),
+		Title:     github.Ptr(sanitize.PlainText(string(fragment.Title))),
 		HTMLURL:   github.Ptr(string(fragment.URL)),
 		CreatedAt: &github.Timestamp{Time: fragment.CreatedAt.Time},
 		UpdatedAt: &github.Timestamp{Time: fragment.UpdatedAt.Time},
@@ -163,7 +165,7 @@ func ListDiscussions(t translations.TranslationHelperFunc) inventory.ServerTool 
 				Required: []string{"owner"},
 			}),
 		},
-		[]scopes.Scope{scopes.Repo},
+		scopes.PublicRead(scopes.Repo),
 		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
 			owner, err := RequiredParam[string](args, "owner")
 			if err != nil {
@@ -272,7 +274,11 @@ func ListDiscussions(t translations.TranslationHelperFunc) inventory.ServerTool 
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to marshal discussions: %w", err)
 			}
-			return utils.NewToolResultText(string(out)), nil, nil
+			result := utils.NewToolResultText(string(out))
+			// Discussion content is user-authored (untrusted); confidentiality
+			// follows repo visibility.
+			result = attachRepoVisibilityIFCLabelLazy(ctx, deps, owner, repo, result, ifc.LabelRepoUserContent)
+			return result, nil, nil
 		},
 	)
 }
@@ -306,7 +312,7 @@ func GetDiscussion(t translations.TranslationHelperFunc) inventory.ServerTool {
 				Required: []string{"owner", "repo", "discussionNumber"},
 			},
 		},
-		[]scopes.Scope{scopes.Repo},
+		scopes.PublicRead(scopes.Repo),
 		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
 			// Decode params
 			var params struct {
@@ -355,8 +361,8 @@ func GetDiscussion(t translations.TranslationHelperFunc) inventory.ServerTool {
 			// like ListDiscussions and GetDiscussionComments).
 			response := map[string]any{
 				"number":     int(d.Number),
-				"title":      string(d.Title),
-				"body":       string(d.Body),
+				"title":      sanitize.PlainText(string(d.Title)),
+				"body":       sanitize.Content(string(d.Body)),
 				"url":        string(d.URL),
 				"closed":     bool(d.Closed),
 				"isAnswered": bool(d.IsAnswered),
@@ -376,7 +382,11 @@ func GetDiscussion(t translations.TranslationHelperFunc) inventory.ServerTool {
 				return nil, nil, fmt.Errorf("failed to marshal discussion: %w", err)
 			}
 
-			return utils.NewToolResultText(string(out)), nil, nil
+			result := utils.NewToolResultText(string(out))
+			// Discussion content is user-authored (untrusted); confidentiality
+			// follows repo visibility.
+			result = attachRepoVisibilityIFCLabelLazy(ctx, deps, params.Owner, params.Repo, result, ifc.LabelRepoUserContent)
+			return result, nil, nil
 		},
 	)
 }
@@ -414,7 +424,7 @@ func GetDiscussionComments(t translations.TranslationHelperFunc) inventory.Serve
 				Required: []string{"owner", "repo", "discussionNumber"},
 			}),
 		},
-		[]scopes.Scope{scopes.Repo},
+		scopes.PublicRead(scopes.Repo),
 		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
 			// Decode params
 			var params struct {
@@ -511,18 +521,10 @@ func GetDiscussionComments(t translations.TranslationHelperFunc) inventory.Serve
 					return utils.NewToolResultError(err.Error()), nil, nil
 				}
 				for _, c := range q.Repository.Discussion.Comments.Nodes {
-					comment := MinimalDiscussionComment{
-						ID:              fmt.Sprintf("%v", c.ID),
-						Body:            string(c.Body),
-						IsAnswer:        bool(c.IsAnswer),
-						ReplyTotalCount: c.Replies.TotalCount,
-					}
+					comment := newMinimalDiscussionComment(fmt.Sprintf("%v", c.ID), string(c.Body), bool(c.IsAnswer))
+					comment.ReplyTotalCount = c.Replies.TotalCount
 					for _, r := range c.Replies.Nodes {
-						comment.Replies = append(comment.Replies, MinimalDiscussionComment{
-							ID:       fmt.Sprintf("%v", r.ID),
-							Body:     string(r.Body),
-							IsAnswer: bool(r.IsAnswer),
-						})
+						comment.Replies = append(comment.Replies, newMinimalDiscussionComment(fmt.Sprintf("%v", r.ID), string(r.Body), bool(r.IsAnswer)))
 					}
 					comments = append(comments, comment)
 				}
@@ -553,11 +555,7 @@ func GetDiscussionComments(t translations.TranslationHelperFunc) inventory.Serve
 					return utils.NewToolResultError(err.Error()), nil, nil
 				}
 				for _, c := range q.Repository.Discussion.Comments.Nodes {
-					comments = append(comments, MinimalDiscussionComment{
-						ID:       fmt.Sprintf("%v", c.ID),
-						Body:     string(c.Body),
-						IsAnswer: bool(c.IsAnswer),
-					})
+					comments = append(comments, newMinimalDiscussionComment(fmt.Sprintf("%v", c.ID), string(c.Body), bool(c.IsAnswer)))
 				}
 				pageInfo = q.Repository.Discussion.Comments.PageInfo
 				totalCount = q.Repository.Discussion.Comments.TotalCount
@@ -580,7 +578,11 @@ func GetDiscussionComments(t translations.TranslationHelperFunc) inventory.Serve
 				return nil, nil, fmt.Errorf("failed to marshal comments: %w", err)
 			}
 
-			return utils.NewToolResultText(string(out)), nil, nil
+			result := utils.NewToolResultText(string(out))
+			// Discussion comments are user-authored (untrusted); confidentiality
+			// follows repo visibility.
+			result = attachRepoVisibilityIFCLabelLazy(ctx, deps, params.Owner, params.Repo, result, ifc.LabelRepoUserContent)
+			return result, nil, nil
 		},
 	)
 }
@@ -637,7 +639,7 @@ Options are:
 				Required: []string{"method"},
 			},
 		},
-		[]scopes.Scope{scopes.Repo},
+		scopes.RequireAll(scopes.Repo),
 		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
 			method, err := RequiredParam[string](args, "method")
 			if err != nil {
@@ -1013,7 +1015,7 @@ func ListDiscussionCategories(t translations.TranslationHelperFunc) inventory.Se
 				Required: []string{"owner"},
 			},
 		},
-		[]scopes.Scope{scopes.Repo},
+		scopes.PublicRead(scopes.Repo),
 		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
 			owner, err := RequiredParam[string](args, "owner")
 			if err != nil {
@@ -1084,7 +1086,11 @@ func ListDiscussionCategories(t translations.TranslationHelperFunc) inventory.Se
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to marshal discussion categories: %w", err)
 			}
-			return utils.NewToolResultText(string(out)), nil, nil
+			result := utils.NewToolResultText(string(out))
+			// Discussion categories are repo-defined structural metadata
+			// (trusted); confidentiality follows repo visibility.
+			result = attachRepoVisibilityIFCLabelLazy(ctx, deps, owner, repo, result, ifc.LabelRepoMetadata)
+			return result, nil, nil
 		},
 	)
 }

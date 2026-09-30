@@ -12,11 +12,12 @@ import (
 	"github.com/github/github-mcp-server/internal/profiler"
 	buffer "github.com/github/github-mcp-server/pkg/buffer"
 	ghErrors "github.com/github/github-mcp-server/pkg/errors"
+	"github.com/github/github-mcp-server/pkg/ifc"
 	"github.com/github/github-mcp-server/pkg/inventory"
 	"github.com/github/github-mcp-server/pkg/scopes"
 	"github.com/github/github-mcp-server/pkg/translations"
 	"github.com/github/github-mcp-server/pkg/utils"
-	"github.com/google/go-github/v87/github"
+	"github.com/google/go-github/v89/github"
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -145,11 +146,11 @@ func getJobLogData(ctx context.Context, client *github.Client, owner, repo strin
 		// Download and return the actual log content
 		content, originalLength, httpResp, err := downloadLogContent(ctx, url.String(), tailLines, contentWindowSize) //nolint:bodyclose // Response body is closed in downloadLogContent, but we need to return httpResp
 		if err != nil {
-			// To keep the return value consistent wrap the response as a GitHub Response
-			ghRes := &github.Response{
-				Response: httpResp,
+			var ghResp *github.Response
+			if httpResp != nil {
+				ghResp = &github.Response{Response: httpResp}
 			}
-			return nil, ghRes, fmt.Errorf("failed to download log content for job %d: %w", jobID, err)
+			return nil, ghResp, fmt.Errorf("failed to download log content for job %d: %w", jobID, err)
 		}
 		result["logs_content"] = content
 		result["message"] = "Job logs content retrieved successfully"
@@ -312,7 +313,7 @@ Use this tool to list workflows in a repository, or list workflow runs, jobs, an
 						Description: "Page number for pagination (default: 1)",
 						Minimum:     jsonschema.Ptr(1.0),
 					},
-					"per_page": {
+					"perPage": {
 						Type:        "number",
 						Description: "Results per page for pagination (default: 30, max: 100)",
 						Minimum:     jsonschema.Ptr(1.0),
@@ -322,7 +323,7 @@ Use this tool to list workflows in a repository, or list workflow runs, jobs, an
 				Required: []string{"method", "owner", "repo"},
 			},
 		},
-		[]scopes.Scope{scopes.Repo},
+		scopes.PublicRead(scopes.Repo),
 		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
 			owner, err := RequiredParam[string](args, "owner")
 			if err != nil {
@@ -354,6 +355,14 @@ Use this tool to list workflows in a repository, or list workflow runs, jobs, an
 				return nil, nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}
 
+			// attachIFC adds the IFC label to a successful Actions result when
+			// IFC labels are enabled. Workflow definitions, runs, jobs,
+			// artifacts and logs echo attacker-influenceable run output, so
+			// integrity is untrusted; confidentiality follows repo visibility.
+			attachIFC := func(r *mcp.CallToolResult) *mcp.CallToolResult {
+				return attachRepoVisibilityIFCLabel(ctx, deps, client, owner, repo, r, ifc.LabelActionsResult)
+			}
+
 			var resourceIDInt int64
 			var parseErr error
 			switch method {
@@ -376,13 +385,17 @@ Use this tool to list workflows in a repository, or list workflow runs, jobs, an
 
 			switch method {
 			case actionsMethodListWorkflows:
-				return listWorkflows(ctx, client, owner, repo, pagination)
+				result, payload, err := listWorkflows(ctx, client, owner, repo, pagination)
+				return attachIFC(result), payload, err
 			case actionsMethodListWorkflowRuns:
-				return listWorkflowRuns(ctx, client, args, owner, repo, resourceID, pagination)
+				result, payload, err := listWorkflowRuns(ctx, client, args, owner, repo, resourceID, pagination)
+				return attachIFC(result), payload, err
 			case actionsMethodListWorkflowJobs:
-				return listWorkflowJobs(ctx, client, args, owner, repo, resourceIDInt, pagination)
+				result, payload, err := listWorkflowJobs(ctx, client, args, owner, repo, resourceIDInt, pagination)
+				return attachIFC(result), payload, err
 			case actionsMethodListWorkflowArtifacts:
-				return listWorkflowArtifacts(ctx, client, owner, repo, resourceIDInt, pagination)
+				result, payload, err := listWorkflowArtifacts(ctx, client, owner, repo, resourceIDInt, pagination)
+				return attachIFC(result), payload, err
 			default:
 				return utils.NewToolResultError(fmt.Sprintf("unknown method: %s", method)), nil, nil
 			}
@@ -440,7 +453,7 @@ Use this tool to get details about individual workflows, workflow runs, jobs, an
 				Required: []string{"method", "owner", "repo", "resource_id"},
 			},
 		},
-		[]scopes.Scope{scopes.Repo},
+		scopes.PublicRead(scopes.Repo),
 		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
 			owner, err := RequiredParam[string](args, "owner")
 			if err != nil {
@@ -465,6 +478,14 @@ Use this tool to get details about individual workflows, workflow runs, jobs, an
 				return nil, nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}
 
+			// attachIFC adds the IFC label to a successful Actions result when
+			// IFC labels are enabled. Workflow runs, jobs, artifacts, usage,
+			// and log URLs reflect attacker-influenceable run output, so
+			// integrity is untrusted; confidentiality follows repo visibility.
+			attachIFC := func(r *mcp.CallToolResult) *mcp.CallToolResult {
+				return attachRepoVisibilityIFCLabel(ctx, deps, client, owner, repo, r, ifc.LabelActionsResult)
+			}
+
 			var resourceIDInt int64
 			var parseErr error
 			switch method {
@@ -480,17 +501,23 @@ Use this tool to get details about individual workflows, workflow runs, jobs, an
 
 			switch method {
 			case actionsMethodGetWorkflow:
-				return getWorkflow(ctx, client, owner, repo, resourceID)
+				result, payload, err := getWorkflow(ctx, client, owner, repo, resourceID)
+				return attachIFC(result), payload, err
 			case actionsMethodGetWorkflowRun:
-				return getWorkflowRun(ctx, client, owner, repo, resourceIDInt)
+				result, payload, err := getWorkflowRun(ctx, client, owner, repo, resourceIDInt)
+				return attachIFC(result), payload, err
 			case actionsMethodGetWorkflowJob:
-				return getWorkflowJob(ctx, client, owner, repo, resourceIDInt)
+				result, payload, err := getWorkflowJob(ctx, client, owner, repo, resourceIDInt)
+				return attachIFC(result), payload, err
 			case actionsMethodDownloadWorkflowArtifact:
-				return downloadWorkflowArtifact(ctx, client, owner, repo, resourceIDInt)
+				result, payload, err := downloadWorkflowArtifact(ctx, client, owner, repo, resourceIDInt)
+				return attachIFC(result), payload, err
 			case actionsMethodGetWorkflowRunUsage:
-				return getWorkflowRunUsage(ctx, client, owner, repo, resourceIDInt)
+				result, payload, err := getWorkflowRunUsage(ctx, client, owner, repo, resourceIDInt)
+				return attachIFC(result), payload, err
 			case actionsMethodGetWorkflowRunLogsURL:
-				return getWorkflowRunLogsURL(ctx, client, owner, repo, resourceIDInt)
+				result, payload, err := getWorkflowRunLogsURL(ctx, client, owner, repo, resourceIDInt)
+				return attachIFC(result), payload, err
 			default:
 				return utils.NewToolResultError(fmt.Sprintf("unknown method: %s", method)), nil, nil
 			}
@@ -554,7 +581,7 @@ func ActionsRunTrigger(t translations.TranslationHelperFunc) inventory.ServerToo
 				Required: []string{"method", "owner", "repo"},
 			},
 		},
-		[]scopes.Scope{scopes.Repo},
+		scopes.RequireAll(scopes.Repo),
 		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
 			owner, err := RequiredParam[string](args, "owner")
 			if err != nil {
@@ -666,7 +693,7 @@ For single job logs, provide job_id. For all failed jobs in a run, provide run_i
 				Required: []string{"owner", "repo"},
 			},
 		},
-		[]scopes.Scope{scopes.Repo},
+		scopes.PublicRead(scopes.Repo),
 		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
 			owner, err := RequiredParam[string](args, "owner")
 			if err != nil {
@@ -719,12 +746,22 @@ For single job logs, provide job_id. For all failed jobs in a run, provide run_i
 				return utils.NewToolResultError("job_id is required when failed_only is false"), nil, nil
 			}
 
+			// attachIFC adds the IFC label to a successful result when IFC
+			// labels are enabled. Job logs echo attacker-influenceable run
+			// output, so integrity is untrusted; confidentiality follows repo
+			// visibility.
+			attachIFC := func(r *mcp.CallToolResult) *mcp.CallToolResult {
+				return attachRepoVisibilityIFCLabel(ctx, deps, client, owner, repo, r, ifc.LabelActionsResult)
+			}
+
 			if failedOnly && runID > 0 {
 				// Handle failed-only mode: get logs for all failed jobs in the workflow run
-				return handleFailedJobLogs(ctx, client, owner, repo, int64(runID), returnContent, tailLines, deps.GetContentWindowSize())
+				result, payload, err := handleFailedJobLogs(ctx, client, owner, repo, int64(runID), returnContent, tailLines, deps.GetContentWindowSize())
+				return attachIFC(result), payload, err
 			} else if jobID > 0 {
 				// Handle single job mode
-				return handleSingleJobLogs(ctx, client, owner, repo, int64(jobID), returnContent, tailLines, deps.GetContentWindowSize())
+				result, payload, err := handleSingleJobLogs(ctx, client, owner, repo, int64(jobID), returnContent, tailLines, deps.GetContentWindowSize())
+				return attachIFC(result), payload, err
 			}
 
 			return utils.NewToolResultError("Either job_id must be provided for single job logs, or run_id with failed_only=true for failed job logs"), nil, nil
@@ -765,7 +802,7 @@ func getWorkflowRun(ctx context.Context, client *github.Client, owner, repo stri
 		return ghErrors.NewGitHubAPIErrorResponse(ctx, "failed to get workflow run", resp, err), nil, nil
 	}
 	defer func() { _ = resp.Body.Close() }()
-	r, err := json.Marshal(workflowRun)
+	r, err := json.Marshal(convertToMinimalWorkflowRun(workflowRun))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to marshal workflow run: %w", err)
 	}
@@ -847,7 +884,7 @@ func listWorkflowRuns(ctx context.Context, client *github.Client, args map[strin
 	}
 
 	defer func() { _ = resp.Body.Close() }()
-	r, err := json.Marshal(workflowRuns)
+	r, err := json.Marshal(convertToMinimalWorkflowRuns(workflowRuns))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to marshal workflow runs: %w", err)
 	}
@@ -882,7 +919,7 @@ func listWorkflowJobs(ctx context.Context, client *github.Client, args map[strin
 	}
 
 	response := map[string]any{
-		"jobs": workflowJobs,
+		"jobs": convertToMinimalWorkflowJobs(workflowJobs),
 	}
 
 	defer func() { _ = resp.Body.Close() }()

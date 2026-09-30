@@ -29,7 +29,7 @@ The list below is generated from the Go source. It covers tool **inventory and s
 ### `remote_mcp_ui_apps`
 
 - **create_pull_request** - Open new pull request
-  - **Required OAuth Scopes**: `repo`
+  - **OAuth Challenge Scopes**: `repo`
   - **MCP App UI**: `ui://github-mcp-server/pr-write`
   - `base`: Branch to merge into (string, required)
   - `body`: PR description (string, optional)
@@ -38,40 +38,19 @@ The list below is generated from the Go source. It covers tool **inventory and s
   - `maintainer_can_modify`: Allow maintainer edits (boolean, optional)
   - `owner`: Repository owner (string, required)
   - `repo`: Repository name (string, required)
+  - `reviewers`: GitHub usernames or ORG/team-slug team reviewers to request reviews from (string[], optional)
   - `title`: PR title (string, required)
 
 - **get_me** - Get my user profile
   - **MCP App UI**: `ui://github-mcp-server/get-me`
   - No parameters required
 
-- **issue_write** - Create or update issue
-  - **Required OAuth Scopes**: `repo`
+- **issue_write** - Create or update issue/pull request
+  - **OAuth Challenge Scopes**: `repo`
   - **MCP App UI**: `ui://github-mcp-server/issue-write`
   - `assignees`: Usernames to assign to this issue (string[], optional)
   - `body`: Issue body content (string, optional)
-  - `duplicate_of`: Issue number that this issue is a duplicate of. Only used when state_reason is 'duplicate'. (number, optional)
-  - `issue_number`: Issue number to update (number, optional)
-  - `labels`: Labels to apply to this issue (string[], optional)
-  - `method`: Write operation to perform on a single issue.
-    Options are:
-    - 'create' - creates a new issue.
-    - 'update' - updates an existing issue.
-     (string, required)
-  - `milestone`: Milestone number (number, optional)
-  - `owner`: Repository owner (string, required)
-  - `repo`: Repository name (string, required)
-  - `state`: New state (string, optional)
-  - `state_reason`: Reason for the state change. Ignored unless state is changed. (string, optional)
-  - `title`: Issue title (string, optional)
-  - `type`: Type of this issue. Only use if the repository has issue types configured. Use list_issue_types tool to get valid type values for the organization. If the repository doesn't support issue types, omit this parameter. (string, optional)
-
-### `remote_mcp_issue_fields`
-
-- **issue_write** - Create or update issue
-  - **Required OAuth Scopes**: `repo`
-  - `assignees`: Usernames to assign to this issue (string[], optional)
-  - `body`: Issue body content (string, optional)
-  - `duplicate_of`: Issue number that this issue is a duplicate of. Only used when state_reason is 'duplicate'. (number, optional)
+  - `duplicate_of`: Issue number that this issue is a duplicate of. Required when state_reason is 'duplicate'. (number, optional)
   - `issue_fields`: Issue field values to set or clear. Each item requires 'field_name' and exactly one of 'value', 'field_option_name', or 'delete: true'. (object[], optional)
   - `issue_number`: Issue number to update (number, optional)
   - `labels`: Labels to apply to this issue (string[], optional)
@@ -82,30 +61,79 @@ The list below is generated from the Go source. It covers tool **inventory and s
      (string, required)
   - `milestone`: Milestone number (number, optional)
   - `owner`: Repository owner (string, required)
+  - `parent_issue_number`: Issue number of the parent issue. Only used when method is 'create' and cannot be combined with issue_fields. The new issue is created and attached to this parent in the same operation. (number, optional)
+  - `parent_owner`: Repository owner of the parent issue. Must be provided with parent_repo. Omit both to use owner and repo. Only used when method is 'create' and parent_issue_number is provided. (string, optional)
+  - `parent_repo`: Repository name of the parent issue. Must be provided with parent_owner. Omit both to use owner and repo. Only used when method is 'create' and parent_issue_number is provided. (string, optional)
   - `repo`: Repository name (string, required)
   - `state`: New state (string, optional)
   - `state_reason`: Reason for the state change. Ignored unless state is changed. (string, optional)
   - `title`: Issue title (string, optional)
-  - `type`: Type of this issue. Only use if the repository has issue types configured. Use list_issue_types tool to get valid type values for the organization. If the repository doesn't support issue types, omit this parameter. (string, optional)
+  - `type`: Type of this issue. For updates, pass null to remove the current type. Only use if issue types are enabled for this repository. Use list_issue_types to get valid type values for this repository or its owner organization. If the repository doesn't support issue types, omit this parameter. (string | null, optional)
 
-- **list_issue_fields** - List issue fields
-  - **Required OAuth Scopes**: `repo`, `read:org`
-  - **Accepted OAuth Scopes**: `admin:org`, `read:org`, `repo`, `write:org`
-  - `owner`: The account owner of the repository or organization. The name is not case sensitive. (string, required)
-  - `repo`: The name of the repository. When provided, returns fields for this specific repository (inherited from its organization). When omitted, returns org-level fields directly. (string, optional)
+- **ui_get** - Get UI data
+  - **OAuth Challenge Scopes**: `repo`, `read:org`
+  - `method`: The type of data to fetch (string, required)
+  - `owner`: Repository owner (required for all methods) (string, required)
+  - `repo`: Repository name (required for labels, assignees, milestones, branches, issue fields, reviewers) (string, optional)
 
-- **list_issues** - List issues
-  - **Required OAuth Scopes**: `repo`
-  - `after`: Cursor for pagination. Use the endCursor from the previous page's PageInfo for GraphQL APIs. (string, optional)
-  - `direction`: Order direction. If provided, the 'orderBy' also needs to be provided. (string, optional)
-  - `field_filters`: Filter by custom issue field values. Each entry takes a field_name and a value; the server looks up the field and coerces the value to its type (single-select option name, text, number, or YYYY-MM-DD date). (object[], optional)
-  - `labels`: Filter by labels (string[], optional)
-  - `orderBy`: Order issues by field. If provided, the 'direction' also needs to be provided. (string, optional)
+- **update_pull_request** - Edit pull request
+  - **OAuth Challenge Scopes**: `repo`
+  - **MCP App UI**: `ui://github-mcp-server/pr-edit`
+  - `base`: New base branch name (string, optional)
+  - `body`: New description (string, optional)
+  - `draft`: Mark pull request as draft (true) or ready for review (false) (boolean, optional)
+  - `maintainer_can_modify`: Allow maintainer edits (boolean, optional)
   - `owner`: Repository owner (string, required)
-  - `perPage`: Results per page for pagination (min 1, max 100) (number, optional)
+  - `pullNumber`: Pull request number to update (number, required)
   - `repo`: Repository name (string, required)
-  - `since`: Filter by date (ISO 8601 timestamp) (string, optional)
-  - `state`: Filter by state, by default both open and closed issues are returned when not provided (string, optional)
+  - `reviewers`: GitHub usernames or ORG/team-slug team reviewers to request reviews from (string[], optional)
+  - `state`: New state (string, optional)
+  - `title`: New title (string, optional)
+
+### `file_blame`
+
+- **get_file_blame** - Get file blame information
+  - **OAuth Challenge Scopes**: `repo`
+  - `after`: Cursor for pagination. Use the cursor from the previous response. (string, optional)
+  - `end_line`: Optional 1-based ending line of the window of interest. Must be >= start_line when both are provided. (number, optional)
+  - `owner`: Repository owner (username or organization) (string, required)
+  - `path`: Path to the file in the repository, relative to the repository root (string, required)
+  - `perPage`: Results per page for pagination (min 1, max 100) (number, optional)
+  - `ref`: Git reference (branch, tag, or commit SHA). Defaults to the repository's default branch (HEAD). (string, optional)
+  - `repo`: Repository name (string, required)
+  - `start_line`: Optional 1-based starting line of the window of interest. Only ranges overlapping [start_line, end_line] are returned, clamped to the window. (number, optional)
+
+### `issue_dependencies`
+
+- **issue_dependency_read** - Read issue dependencies
+  - **OAuth Challenge Scopes**: `repo`
+  - `issue_number`: The number of the issue (number, required)
+  - `method`: The read operation to perform on a single issue's dependencies.
+    Options are:
+    1. get_blocked_by - List the issues that block this issue (this issue is blocked by them).
+    2. get_blocking - List the issues that this issue blocks.
+     (string, required)
+  - `owner`: The owner of the repository (string, required)
+  - `page`: Page number for pagination (min 1) (number, optional)
+  - `perPage`: Results per page for pagination (min 1, max 100) (number, optional)
+  - `repo`: The name of the repository (string, required)
+
+- **issue_dependency_write** - Change issue dependency
+  - **OAuth Challenge Scopes**: `repo`
+  - `issue_number`: The number of the subject issue (number, required)
+  - `method`: The action to perform.
+    Options are:
+    - 'add' - create the dependency relationship.
+    - 'remove' - delete the dependency relationship. (string, required)
+  - `owner`: The owner of the subject issue's repository (string, required)
+  - `related_issue_number`: The number of the related issue to link or unlink (number, required)
+  - `related_owner`: The owner of the related issue's repository. Defaults to 'owner' when omitted. (string, optional)
+  - `related_repo`: The name of the related issue's repository. Defaults to 'repo' when omitted. (string, optional)
+  - `repo`: The name of the subject issue's repository (string, required)
+  - `type`: The relationship direction relative to the subject issue.
+    Options are:
+    - 'blocked_by' - the subject issue is blocked by the related issue.
+    - 'blocking' - the subject issue blocks the related issue. (string, required)
 
 <!-- END AUTOMATED INSIDERS TOOLS -->
 
@@ -172,10 +200,17 @@ Insiders is a **meta feature flag** — the same shape as `default` or `all` for
 
 1. **User input.** Users may opt into specific features:
    - Local server: `--features=<flag>,<flag>` CLI flag (or `GITHUB_FEATURES` env var).
-   - Self-hosted HTTP server: `X-MCP-Features: <flag>,<flag>` request header.
+   - HTTP server: `X-MCP-Features: <flag>,<flag>` request header or a
+     `?features=<flag>,<flag>` server URL. Header presence takes precedence,
+     and the two request channels are never combined.
 2. **Allowlist filter.** User-supplied flags are filtered against [`AllowedFeatureFlags`](../pkg/github/feature_flags.go). Anything not on the allowlist is silently dropped — flags missing from the allowlist can only be turned on by remote-server feature management, not by end users.
 3. **Insiders expansion.** If insiders mode is on (`--insiders`, `/insiders` route, or `X-MCP-Insiders: true`), every flag in [`InsidersFeatureFlags`](../pkg/github/feature_flags.go) is unioned in. The insiders expansion is **not** re-validated against the allowlist — insiders is a server-controlled switch that can reach internal-only flags.
 4. **Server-side fallback (remote server only).** Any flag not yet decided falls back to the remote server's feature manager, which can roll a feature out independently of user input or insiders membership.
+
+For tool availability, functional rules declare the flags they may read and are
+evaluated lazily after request narrowing. Short-circuiting skips unnecessary
+checks, and request-owned state memoizes each flag that is reached. The same
+state backs `deps.IsFeatureEnabled`.
 
 `AllowedFeatureFlags` and `InsidersFeatureFlags` are deliberately independent sets:
 
@@ -186,7 +221,9 @@ Insiders is a **meta feature flag** — the same shape as `default` or `all` for
 ### Adding a new feature flag
 
 1. Add a constant in `pkg/github/feature_flags.go`.
-2. Add it to `AllowedFeatureFlags` if end users should be able to opt in via `--features` / `X-MCP-Features`.
+2. Add it to `AllowedFeatureFlags` if end users should be able to opt in via
+   `--features`, `X-MCP-Features`, or the `features` URL query parameter.
 3. Add it to `InsidersFeatureFlags` if insiders mode should turn it on automatically.
-4. Gate the behavior on the concrete flag (`deps.IsFeatureEnabled(ctx, FeatureFlagX)`), never on `cfg.InsidersMode`. There is a `TestGitHubPackageDoesNotReadInsidersMode` guard test that fails if `pkg/github` reads `InsidersMode` directly.
-5. The MCP-diff CI workflow picks up new entries in `AllowedFeatureFlags` automatically — see `.github/workflows/mcp-diff.yml`.
+4. For tool availability, attach an `inventory.NewFeatureRule` that declares every flag used by its predicate. For behavior inside a handler, use `deps.IsFeatureEnabled(ctx, FeatureFlagX)`.
+5. Gate on concrete flags, never on `cfg.InsidersMode`. There is a `TestGitHubPackageDoesNotReadInsidersMode` guard test that fails if `pkg/github` reads `InsidersMode` directly.
+6. The MCP-diff CI workflow picks up new entries in `AllowedFeatureFlags` automatically — see `.github/workflows/mcp-diff.yml`.

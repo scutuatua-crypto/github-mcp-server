@@ -1,9 +1,7 @@
 package github
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -17,7 +15,7 @@ import (
 	"github.com/github/github-mcp-server/pkg/octicons"
 	"github.com/github/github-mcp-server/pkg/raw"
 	"github.com/github/github-mcp-server/pkg/translations"
-	"github.com/google/go-github/v87/github"
+	"github.com/google/go-github/v89/github"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yosida95/uritemplate/v3"
 )
@@ -225,22 +223,12 @@ func RepositoryResourceContentsHandler(resourceURITemplate *uritemplate.Template
 					},
 				}, nil
 			default:
-				var buf bytes.Buffer
-				base64Encoder := base64.NewEncoder(base64.StdEncoding, &buf)
-				_, err := base64Encoder.Write(content)
-				if err != nil {
-					return nil, fmt.Errorf("failed to base64 encode content: %w", err)
-				}
-				if err := base64Encoder.Close(); err != nil {
-					return nil, fmt.Errorf("failed to close base64 encoder: %w", err)
-				}
-
 				return &mcp.ReadResourceResult{
 					Contents: []*mcp.ResourceContents{
 						{
 							URI:      request.Params.URI,
 							MIMEType: mimeType,
-							Blob:     buf.Bytes(),
+							Blob:     content,
 						},
 					},
 				}, nil

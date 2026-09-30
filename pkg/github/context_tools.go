@@ -62,7 +62,7 @@ func GetMe(t translations.TranslationHelperFunc) inventory.ServerTool {
 				},
 			},
 		},
-		nil,
+		scopes.NoScopes(),
 		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, _ map[string]any) (*mcp.CallToolResult, any, error) {
 			client, err := deps.GetClient(ctx)
 			if err != nil {
@@ -106,12 +106,7 @@ func GetMe(t translations.TranslationHelperFunc) inventory.ServerTool {
 			}
 
 			result := MarshalledTextResult(minimalUser)
-			if deps.IsFeatureEnabled(ctx, FeatureFlagIFCLabels) {
-				if result.Meta == nil {
-					result.Meta = mcp.Meta{}
-				}
-				result.Meta["ifc"] = ifc.LabelGetMe()
-			}
+			result = attachStaticIFCLabel(ctx, deps, result, ifc.LabelGetMe())
 			return result, nil, nil
 		},
 	)
@@ -148,7 +143,7 @@ func GetTeams(t translations.TranslationHelperFunc) inventory.ServerTool {
 				},
 			},
 		},
-		[]scopes.Scope{scopes.ReadOrg},
+		scopes.RequireAll(scopes.ReadOrg),
 		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
 			user, err := OptionalParam[string](args, "user")
 			if err != nil {
@@ -221,7 +216,12 @@ func GetTeams(t translations.TranslationHelperFunc) inventory.ServerTool {
 				organizations = append(organizations, orgTeams)
 			}
 
-			return MarshalledTextResult(organizations), nil, nil
+			result := MarshalledTextResult(organizations)
+			// Team membership is maintained by GitHub and cannot be forged by
+			// outside contributors (trusted). Org team rosters are visible only
+			// to org members, so confidentiality is private.
+			result = attachStaticIFCLabel(ctx, deps, result, ifc.LabelTeam())
+			return result, nil, nil
 		},
 	)
 }
@@ -251,7 +251,7 @@ func GetTeamMembers(t translations.TranslationHelperFunc) inventory.ServerTool {
 				Required: []string{"org", "team_slug"},
 			},
 		},
-		[]scopes.Scope{scopes.ReadOrg},
+		scopes.RequireAll(scopes.ReadOrg),
 		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
 			org, err := RequiredParam[string](args, "org")
 			if err != nil {
@@ -292,7 +292,12 @@ func GetTeamMembers(t translations.TranslationHelperFunc) inventory.ServerTool {
 				members = append(members, string(member.Login))
 			}
 
-			return MarshalledTextResult(members), nil, nil
+			result := MarshalledTextResult(members)
+			// Team membership is maintained by GitHub and cannot be forged by
+			// outside contributors (trusted). A team's member roster is visible
+			// only to org members, so confidentiality is private.
+			result = attachStaticIFCLabel(ctx, deps, result, ifc.LabelTeam())
+			return result, nil, nil
 		},
 	)
 }

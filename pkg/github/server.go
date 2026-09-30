@@ -35,7 +35,7 @@ type MCPServerConfig struct {
 	EnabledTools []string
 
 	// EnabledFeatures is a list of feature flags that are enabled
-	// Items with FeatureFlagEnable matching an entry in this list will be available
+	// Tool feature rules evaluate entries in this list.
 	EnabledFeatures []string
 
 	// ReadOnly indicates if we should only offer read-only tools
@@ -68,6 +68,15 @@ type MCPServerConfig struct {
 	// This is used for PAT scope filtering where we can't issue scope challenges.
 	TokenScopes []string
 
+	// TokenProvider, when non-nil, supplies the GitHub token for each API
+	// request instead of the static Token.
+	TokenProvider func() string
+
+	// ToolHandlerMiddleware wraps every registered tool handler. Unlike MCP
+	// receiving middleware, these wrappers execute inside Server.callTool, so
+	// SDK result finalization still runs on results they return.
+	ToolHandlerMiddleware []inventory.ToolHandlerMiddleware
+
 	// Additional server options to apply
 	ServerOptions []MCPServerOption
 }
@@ -80,6 +89,18 @@ func NewMCPServer(ctx context.Context, cfg *MCPServerConfig, deps ToolDependenci
 		Instructions:      inv.Instructions(),
 		Logger:            cfg.Logger,
 		CompletionHandler: CompletionsHandler(deps.GetClient),
+		// Advertise tools, prompts, and resources without list-changed
+		// notifications. The server has a static set of tools/prompts/resources
+		// and never mutates them at runtime, so it never emits list_changed
+		// notifications. Left unset, the SDK would infer listChanged:true from
+		// the presence of items and advertise a capability we don't support -
+		// which the 2026-07-28 spec (subscriptions/listen) makes stricter still.
+		// Explicitly declaring these keeps the advertised capabilities honest.
+		Capabilities: &mcp.ServerCapabilities{
+			Tools:     &mcp.ToolCapabilities{},
+			Prompts:   &mcp.PromptCapabilities{},
+			Resources: &mcp.ResourceCapabilities{},
+		},
 	}
 
 	// Apply any additional server options
@@ -92,6 +113,7 @@ func NewMCPServer(ctx context.Context, cfg *MCPServerConfig, deps ToolDependenci
 	// Add middlewares. Order matters - for example, the error context middleware should be applied last so that it runs FIRST (closest to the handler) to ensure all errors are captured,
 	// and any middleware that needs to read or modify the context should be before it.
 	ghServer.AddReceivingMiddleware(middleware...)
+	ghServer.AddReceivingMiddleware(injectFeatureStateMiddleware(inv))
 	ghServer.AddReceivingMiddleware(InjectDepsMiddleware(deps))
 	ghServer.AddReceivingMiddleware(addGitHubAPIErrorToContext)
 
@@ -100,7 +122,7 @@ func NewMCPServer(ctx context.Context, cfg *MCPServerConfig, deps ToolDependenci
 	}
 
 	// Register GitHub tools/resources/prompts from the inventory.
-	inv.RegisterAll(ctx, ghServer, deps)
+	inv.RegisterAll(ctx, ghServer, deps, cfg.ToolHandlerMiddleware...)
 
 	// Register MCP App UI resources whenever the embedded UI assets are
 	// available. The resources are static HTML and are only referenced by
@@ -111,10 +133,18 @@ func NewMCPServer(ctx context.Context, cfg *MCPServerConfig, deps ToolDependenci
 	// remote/HTTP server also serves them, fixing the "-32002 Resource not
 	// found" error clients hit after the tool returns a ui:// URI.
 	if UIAssetsAvailable() {
-		RegisterUIResources(ghServer)
+		RegisterUIResources(ghServer, cfg.ReadOnly)
 	}
 
 	return ghServer, nil
+}
+
+func injectFeatureStateMiddleware(inv *inventory.Inventory) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			return next(inv.WithFeatureState(ctx), method, req)
+		}
+	}
 }
 
 // ResolvedEnabledToolsets determines which toolsets should be enabled based on config.

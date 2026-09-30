@@ -9,7 +9,7 @@ import (
 
 	"github.com/github/github-mcp-server/internal/toolsnaps"
 	"github.com/github/github-mcp-server/pkg/translations"
-	"github.com/google/go-github/v87/github"
+	"github.com/google/go-github/v89/github"
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -238,7 +238,7 @@ func Test_SearchRepositories_IFC_InsidersMode(t *testing.T) {
 		assert.Equal(t, "public", ifcMap["confidentiality"])
 	})
 
-	t.Run("insiders mode any private match emits private untrusted", func(t *testing.T) {
+	t.Run("insiders mode mixed public and private emits private untrusted", func(t *testing.T) {
 		deps := BaseDeps{
 			Client: mustNewGHClient(t, makeMockClient([]repoFixture{
 				{owner: "octocat", name: "private-repo", isPrivate: true},
@@ -354,6 +354,7 @@ func Test_SearchCode(t *testing.T) {
 	assert.Contains(t, schema.Properties, "order")
 	assert.Contains(t, schema.Properties, "perPage")
 	assert.Contains(t, schema.Properties, "page")
+	assert.Contains(t, schema.Properties, "fields")
 	assert.ElementsMatch(t, schema.Required, []string{"query"})
 
 	// Setup mock search results
@@ -507,6 +508,132 @@ func Test_SearchCode(t *testing.T) {
 			}
 		})
 	}
+}
+
+func Test_SearchCode_FieldFiltering(t *testing.T) {
+	mockSearchResult := &github.CodeSearchResult{
+		Total:             github.Ptr(1),
+		IncompleteResults: github.Ptr(false),
+		CodeResults: []*github.CodeResult{
+			{
+				Name: github.Ptr("file1.go"),
+				Path: github.Ptr("path/to/file1.go"),
+				SHA:  github.Ptr("abc123def456"),
+				Repository: &github.Repository{
+					Name:     github.Ptr("repo"),
+					FullName: github.Ptr("owner/repo"),
+				},
+				TextMatches: []*github.TextMatch{
+					{Fragment: github.Ptr("func main() {}")},
+				},
+			},
+		},
+	}
+
+	serverTool := SearchCode(translations.NullTranslationHelper)
+	client := mustNewGHClient(t, MockHTTPClientWithHandlers(map[string]http.HandlerFunc{
+		GetSearchCode: mockResponse(t, http.StatusOK, mockSearchResult),
+	}))
+	deps := BaseDeps{Client: client}
+	handler := serverTool.Handler(deps)
+
+	request := createMCPRequest(map[string]any{
+		"query":  "fmt.Println language:go",
+		"fields": []any{"name", "path"},
+	})
+
+	result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	textContent := getTextResult(t, result)
+
+	// The wrapper metadata is preserved while each item is reduced to the
+	// requested fields only; the heavier repository and text_matches data is
+	// dropped.
+	var returned struct {
+		TotalCount        int              `json:"total_count"`
+		IncompleteResults bool             `json:"incomplete_results"`
+		Items             []map[string]any `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(textContent.Text), &returned))
+	assert.Equal(t, 1, returned.TotalCount)
+	require.Len(t, returned.Items, 1)
+	require.Len(t, returned.Items[0], 2)
+	assert.Contains(t, returned.Items[0], "name")
+	assert.Contains(t, returned.Items[0], "path")
+
+	assert.NotContains(t, textContent.Text, "repository")
+	assert.NotContains(t, textContent.Text, "text_matches")
+}
+
+func Test_SearchCode_FieldsTelemetry(t *testing.T) {
+	mockSearchResult := &github.CodeSearchResult{
+		Total:             github.Ptr(1),
+		IncompleteResults: github.Ptr(false),
+		CodeResults: []*github.CodeResult{
+			{
+				Name: github.Ptr("file1.go"),
+				Path: github.Ptr("path/to/file1.go"),
+				SHA:  github.Ptr("abc123def456"),
+				Repository: &github.Repository{
+					Name:     github.Ptr("repo"),
+					FullName: github.Ptr("owner/repo"),
+				},
+				TextMatches: []*github.TextMatch{
+					{Fragment: github.Ptr("func main() {}")},
+				},
+			},
+		},
+	}
+
+	serverTool := SearchCode(translations.NullTranslationHelper)
+	client := mustNewGHClient(t, MockHTTPClientWithHandlers(map[string]http.HandlerFunc{
+		GetSearchCode: mockResponse(t, http.StatusOK, mockSearchResult),
+	}))
+
+	t.Run("filtered call records savings", func(t *testing.T) {
+		deps, rec := depsWithRecordingMetrics(t, BaseDeps{Client: client})
+		handler := serverTool.Handler(deps)
+
+		request := createMCPRequest(map[string]any{
+			"query":  "fmt.Println language:go",
+			"fields": []any{"name", "path"},
+		})
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+
+		call, ok := rec.increment(metricFieldsToolCall)
+		require.True(t, ok)
+		assert.Equal(t, "search_code", call.tags["tool"])
+		assert.Equal(t, "true", call.tags["filtered"])
+
+		full, ok := rec.counter(metricFieldsBytesFull)
+		require.True(t, ok)
+		sent, ok := rec.counter(metricFieldsBytesSent)
+		require.True(t, ok)
+		assert.Greater(t, full.value, sent.value, "filtering should remove bytes")
+	})
+
+	t.Run("unfiltered call records adoption only", func(t *testing.T) {
+		deps, rec := depsWithRecordingMetrics(t, BaseDeps{Client: client})
+		handler := serverTool.Handler(deps)
+
+		request := createMCPRequest(map[string]any{
+			"query": "fmt.Println language:go",
+		})
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+
+		call, ok := rec.increment(metricFieldsToolCall)
+		require.True(t, ok)
+		assert.Equal(t, "false", call.tags["filtered"])
+
+		_, ok = rec.counter(metricFieldsBytesFull)
+		assert.False(t, ok, "no byte counters when not filtered")
+	})
 }
 
 func Test_SearchUsers(t *testing.T) {

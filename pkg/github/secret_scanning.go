@@ -8,11 +8,12 @@ import (
 	"net/http"
 
 	ghErrors "github.com/github/github-mcp-server/pkg/errors"
+	"github.com/github/github-mcp-server/pkg/ifc"
 	"github.com/github/github-mcp-server/pkg/inventory"
 	"github.com/github/github-mcp-server/pkg/scopes"
 	"github.com/github/github-mcp-server/pkg/translations"
 	"github.com/github/github-mcp-server/pkg/utils"
-	"github.com/google/go-github/v87/github"
+	"github.com/google/go-github/v89/github"
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -46,7 +47,7 @@ func GetSecretScanningAlert(t translations.TranslationHelperFunc) inventory.Serv
 				Required: []string{"owner", "repo", "alertNumber"},
 			},
 		},
-		[]scopes.Scope{scopes.SecurityEvents},
+		scopes.RequireAll(scopes.SecurityEvents),
 		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
 			owner, err := RequiredParam[string](args, "owner")
 			if err != nil {
@@ -89,7 +90,12 @@ func GetSecretScanningAlert(t translations.TranslationHelperFunc) inventory.Serv
 				return nil, nil, fmt.Errorf("failed to marshal alert: %w", err)
 			}
 
-			return utils.NewToolResultText(string(r)), nil, nil
+			result := utils.NewToolResultText(string(r))
+			// Secret scanning alerts are access-restricted regardless of repo
+			// visibility and surface the matched secret material itself, so the
+			// label is always private-untrusted.
+			result = attachStaticIFCLabel(ctx, deps, result, ifc.LabelSecurityAlert())
+			return result, nil, nil
 		},
 	)
 }
@@ -136,7 +142,7 @@ func ListSecretScanningAlerts(t translations.TranslationHelperFunc) inventory.Se
 			},
 			InputSchema: schema,
 		},
-		[]scopes.Scope{scopes.SecurityEvents},
+		scopes.RequireAll(scopes.SecurityEvents),
 		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
 			owner, err := RequiredParam[string](args, "owner")
 			if err != nil {
@@ -199,7 +205,12 @@ func ListSecretScanningAlerts(t translations.TranslationHelperFunc) inventory.Se
 				return nil, nil, fmt.Errorf("failed to marshal alerts: %w", err)
 			}
 
-			return utils.NewToolResultText(string(r)), nil, nil
+			result := utils.NewToolResultText(string(r))
+			// Secret scanning alerts are access-restricted regardless of repo
+			// visibility and surface the matched secret material itself, so the
+			// label is always private-untrusted.
+			result = attachStaticIFCLabel(ctx, deps, result, ifc.LabelSecurityAlert())
+			return result, nil, nil
 		},
 	)
 }

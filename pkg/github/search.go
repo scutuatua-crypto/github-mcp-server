@@ -13,7 +13,7 @@ import (
 	"github.com/github/github-mcp-server/pkg/scopes"
 	"github.com/github/github-mcp-server/pkg/translations"
 	"github.com/github/github-mcp-server/pkg/utils"
-	"github.com/google/go-github/v87/github"
+	"github.com/google/go-github/v89/github"
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -58,7 +58,7 @@ func SearchRepositories(t translations.TranslationHelperFunc) inventory.ServerTo
 			},
 			InputSchema: schema,
 		},
-		[]scopes.Scope{scopes.Repo},
+		scopes.PublicRead(scopes.Repo),
 		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
 			query, err := RequiredParam[string](args, "query")
 			if err != nil {
@@ -163,22 +163,23 @@ func SearchRepositories(t translations.TranslationHelperFunc) inventory.ServerTo
 			}
 
 			callResult := utils.NewToolResultText(string(r))
-			if deps.IsFeatureEnabled(ctx, FeatureFlagIFCLabels) {
-				attachSearchRepositoriesIFCLabel(result.Repositories, callResult)
-			}
+			attachSearchRepositoriesIFCLabel(ctx, deps, result.Repositories, callResult)
 			return callResult, nil, nil
 		},
 	)
 }
 
 // attachSearchRepositoriesIFCLabel joins per-repository IFC labels across
-// every matched repository and attaches the result to callResult. Visibility
-// is read directly from the search response — no extra API call. The join
-// math is shared with search_issues via ifc.LabelSearchIssues: integrity is
-// always untrusted; confidentiality is private if any matched repository is
-// private, otherwise public.
-func attachSearchRepositoriesIFCLabel(repos []*github.Repository, callResult *mcp.CallToolResult) {
-	if callResult == nil || callResult.IsError {
+// every matched repository and attaches the result to callResult when IFC
+// labels are enabled. Visibility is read directly from the search response —
+// no extra API call. The join math is shared with search_issues via
+// ifc.LabelSearchIssues: public-only results stay public-untrusted,
+// mixed-visibility results become private-untrusted, and all-private results
+// become private-trusted. The
+// feature-flag check is centralized here (mirroring the attach* helpers in
+// ifc_labels.go) so the handler can call this unconditionally.
+func attachSearchRepositoriesIFCLabel(ctx context.Context, deps ToolDependencies, repos []*github.Repository, callResult *mcp.CallToolResult) {
+	if callResult == nil || callResult.IsError || !deps.IsFeatureEnabled(ctx, FeatureFlagIFCLabels) {
 		return
 	}
 
@@ -187,10 +188,7 @@ func attachSearchRepositoriesIFCLabel(repos []*github.Repository, callResult *mc
 		visibilities = append(visibilities, repo.GetPrivate())
 	}
 
-	if callResult.Meta == nil {
-		callResult.Meta = mcp.Meta{}
-	}
-	callResult.Meta["ifc"] = ifc.LabelSearchIssues(visibilities)
+	setIFCLabel(callResult, ifc.LabelSearchIssues(visibilities))
 }
 
 // SearchCode creates a tool to search for code across GitHub repositories.
@@ -214,6 +212,10 @@ func SearchCode(t translations.TranslationHelperFunc) inventory.ServerTool {
 		},
 		Required: []string{"query"},
 	}
+	schema.Properties["fields"] = fieldsSchemaProperty(
+		"Subset of fields to return for each code search result. If omitted, all fields are returned. Use this to reduce response size when you only need specific fields; omitting 'repository' and 'text_matches' in particular drops the largest per-result data.",
+		codeSearchItemFieldEnum,
+	)
 	WithPagination(schema)
 
 	return NewTool(
@@ -227,7 +229,7 @@ func SearchCode(t translations.TranslationHelperFunc) inventory.ServerTool {
 			},
 			InputSchema: schema,
 		},
-		[]scopes.Scope{scopes.Repo},
+		scopes.PublicRead(scopes.Repo),
 		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
 			query, err := RequiredParam[string](args, "query")
 			if err != nil {
@@ -238,6 +240,10 @@ func SearchCode(t translations.TranslationHelperFunc) inventory.ServerTool {
 				return utils.NewToolResultError(err.Error()), nil, nil
 			}
 			order, err := OptionalParam[string](args, "order")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+			fields, err := OptionalStringArrayParam(args, "fields")
 			if err != nil {
 				return utils.NewToolResultError(err.Error()), nil, nil
 			}
@@ -299,14 +305,48 @@ func SearchCode(t translations.TranslationHelperFunc) inventory.ServerTool {
 				Items:             minimalItems,
 			}
 
-			r, err := json.Marshal(minimalResult)
+			filtered := false
+			var payload any = minimalResult
+			if len(fields) > 0 {
+				filteredItems, err := filterEachField(minimalItems, fields)
+				if err != nil {
+					return utils.NewToolResultErrorFromErr("failed to filter code search results", err), nil, nil
+				}
+				payload = map[string]any{
+					"total_count":        minimalResult.TotalCount,
+					"incomplete_results": minimalResult.IncompleteResults,
+					"items":              filteredItems,
+				}
+				filtered = true
+			}
+
+			r, err := json.Marshal(payload)
 			if err != nil {
 				return utils.NewToolResultErrorFromErr("failed to marshal response", err), nil, nil
 			}
 
-			return utils.NewToolResultText(string(r)), nil, nil
+			recordSearchCodeFieldsUsage(ctx, deps, minimalResult, filtered, len(r))
+
+			callResult := utils.NewToolResultText(string(r))
+			// Code search spans repositories; the IFC label is the conservative
+			// join across every matched repository's visibility, read directly
+			// from the search response.
+			visibilities := make([]bool, 0, len(result.CodeResults))
+			for _, code := range result.CodeResults {
+				if code.Repository != nil {
+					visibilities = append(visibilities, code.Repository.GetPrivate())
+				}
+			}
+			callResult = attachJoinedIFCLabel(ctx, deps, callResult, visibilities, ifc.LabelSearchIssues)
+			return callResult, nil, nil
 		},
 	)
+}
+
+// recordSearchCodeFieldsUsage emits fields telemetry for a search_code call.
+// sentBytes is the size of the payload actually returned.
+func recordSearchCodeFieldsUsage(ctx context.Context, deps ToolDependencies, full *MinimalCodeSearchResult, filtered bool, sentBytes int) {
+	recordFieldsUsageFor(ctx, deps, "search_code", full, filtered, sentBytes)
 }
 
 func userOrOrgHandler(ctx context.Context, accountType string, deps ToolDependencies, args map[string]any) (*mcp.CallToolResult, any, error) {
@@ -392,7 +432,11 @@ func userOrOrgHandler(ctx context.Context, accountType string, deps ToolDependen
 	if err != nil {
 		return utils.NewToolResultErrorFromErr("failed to marshal response", err), nil, nil
 	}
-	return utils.NewToolResultText(string(r)), nil, nil
+	callResult := utils.NewToolResultText(string(r))
+	// User and organization search returns public profile information that is
+	// authored by the account holders themselves, so it is public-untrusted.
+	callResult = attachStaticIFCLabel(ctx, deps, callResult, ifc.PublicUntrusted())
+	return callResult, nil, nil
 }
 
 // SearchUsers creates a tool to search for GitHub users.
@@ -430,7 +474,7 @@ func SearchUsers(t translations.TranslationHelperFunc) inventory.ServerTool {
 			},
 			InputSchema: schema,
 		},
-		[]scopes.Scope{scopes.Repo},
+		scopes.PublicRead(scopes.Repo),
 		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
 			return userOrOrgHandler(ctx, "user", deps, args)
 		},
@@ -472,7 +516,7 @@ func SearchOrgs(t translations.TranslationHelperFunc) inventory.ServerTool {
 			},
 			InputSchema: schema,
 		},
-		[]scopes.Scope{scopes.ReadOrg},
+		scopes.RequireAll(scopes.ReadOrg),
 		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
 			return userOrOrgHandler(ctx, "org", deps, args)
 		},
@@ -514,7 +558,7 @@ func SearchCommits(t translations.TranslationHelperFunc) inventory.ServerTool {
 			},
 			InputSchema: schema,
 		},
-		[]scopes.Scope{scopes.Repo},
+		scopes.PublicRead(scopes.Repo),
 		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
 			query, err := RequiredParam[string](args, "query")
 			if err != nil {
@@ -580,7 +624,18 @@ func SearchCommits(t translations.TranslationHelperFunc) inventory.ServerTool {
 				return utils.NewToolResultErrorFromErr("failed to marshal response", err), nil, nil
 			}
 
-			return utils.NewToolResultText(string(r)), nil, nil
+			callResult := utils.NewToolResultText(string(r))
+			// Commit search spans repositories; the IFC label is the conservative
+			// join across every matched repository's visibility, read directly
+			// from the search response.
+			visibilities := make([]bool, 0, len(result.Commits))
+			for _, commit := range result.Commits {
+				if commit.Repository != nil {
+					visibilities = append(visibilities, commit.Repository.GetPrivate())
+				}
+			}
+			callResult = attachJoinedIFCLabel(ctx, deps, callResult, visibilities, ifc.LabelSearchIssues)
+			return callResult, nil, nil
 		},
 	)
 }

@@ -11,7 +11,7 @@ import (
 
 	ghErrors "github.com/github/github-mcp-server/pkg/errors"
 	"github.com/github/github-mcp-server/pkg/utils"
-	"github.com/google/go-github/v87/github"
+	"github.com/google/go-github/v89/github"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -45,6 +45,12 @@ type searchPostProcessFn func(ctx context.Context, result *github.IssuesSearchRe
 
 type searchConfig struct {
 	postProcess searchPostProcessFn
+	// fields, when non-empty, restricts each result item to the requested
+	// subset of fields. fieldsTool and fieldsDeps identify the calling tool and
+	// its dependencies so fields telemetry can be recorded.
+	fields     []string
+	fieldsTool string
+	fieldsDeps ToolDependencies
 }
 
 type searchOption func(*searchConfig)
@@ -55,17 +61,40 @@ func withSearchPostProcess(fn searchPostProcessFn) searchOption {
 	return func(c *searchConfig) { c.postProcess = fn }
 }
 
+// withFieldsFiltering enables the optional `fields` response filtering for a
+// search tool. When fields is non-empty, each result item is reduced to the
+// requested subset while the total_count / incomplete_results wrapper is
+// preserved. tool and deps identify the caller so fields telemetry (adoption and
+// realized savings) can be recorded.
+func withFieldsFiltering(deps ToolDependencies, tool string, fields []string) searchOption {
+	return func(c *searchConfig) {
+		c.fieldsDeps = deps
+		c.fieldsTool = tool
+		c.fields = fields
+	}
+}
+
+// searchMode selects the engine used to run a search. It maps to the endpoint's
+// search_type parameter.
+type searchMode int
+
+const (
+	// searchModeLexical is the API default, so search_type can be omitted.
+	searchModeLexical searchMode = iota
+	searchModeSemantic
+)
+
 // prepareSearchArgs resolves the search query string and REST search options from the tool args,
 // applying the standard is:<type> / repo:<owner>/<repo> munging shared by search_issues and
 // search_pull_requests.
-func prepareSearchArgs(args map[string]any, searchType string) (string, *github.SearchOptions, error) {
+func prepareSearchArgs(args map[string]any, targetType string, mode searchMode) (string, *github.SearchOptions, error) {
 	query, err := RequiredParam[string](args, "query")
 	if err != nil {
 		return "", nil, err
 	}
 
-	if !hasSpecificFilter(query, "is", searchType) {
-		query = fmt.Sprintf("is:%s %s", searchType, query)
+	if !hasSpecificFilter(query, "is", targetType) {
+		query = fmt.Sprintf("is:%s %s", targetType, query)
 	}
 
 	owner, err := OptionalParam[string](args, "owner")
@@ -109,14 +138,42 @@ func prepareSearchArgs(args map[string]any, searchType string) (string, *github.
 		opts.AdvancedSearch = github.Ptr(true)
 	}
 
+	// Lexical is the API default, so it leaves search_type unset.
+	if mode == searchModeSemantic {
+		query = applySemanticSearch(query, opts)
+	}
+
 	return query, opts, nil
+}
+
+// qualifierQuotePattern matches a quoted qualifier value, e.g. label:"needs
+// triage". The quotes there are meaningful — they delimit a value containing
+// spaces — so they must survive stripFreeTextQuotes.
+var qualifierQuotePattern = regexp.MustCompile(`([-\w.]+:)"([^"]*)"`)
+
+// stripFreeTextQuotes removes quotes around free text while preserving them
+// around qualifier values — since these delimit a value containing spaces.
+func stripFreeTextQuotes(query string) string {
+	const sentinel = "\x00"
+
+	// Hide qualifier quotes behind a sentinel that cannot appear in a query,
+	// strip what remains, then restore them.
+	protected := qualifierQuotePattern.ReplaceAllString(query, "${1}"+sentinel+"${2}"+sentinel)
+	stripped := strings.ReplaceAll(protected, `"`, "")
+	return strings.ReplaceAll(stripped, sentinel, `"`)
+}
+
+// applySemanticSearch switches the request to the semantic index.
+func applySemanticSearch(query string, opts *github.SearchOptions) string {
+	opts.SearchType = "semantic"
+	return stripFreeTextQuotes(query)
 }
 
 func searchHandler(
 	ctx context.Context,
 	getClient GetClientFn,
 	args map[string]any,
-	searchType string,
+	targetType string,
 	errorPrefix string,
 	options ...searchOption,
 ) (*mcp.CallToolResult, error) {
@@ -124,7 +181,7 @@ func searchHandler(
 	for _, opt := range options {
 		opt(&cfg)
 	}
-	query, opts, err := prepareSearchArgs(args, searchType)
+	query, opts, err := prepareSearchArgs(args, targetType, searchModeLexical)
 	if err != nil {
 		return utils.NewToolResultError(err.Error()), nil
 	}
@@ -147,9 +204,34 @@ func searchHandler(
 		return ghErrors.NewGitHubAPIStatusErrorResponse(ctx, errorPrefix, resp, body), nil
 	}
 
-	r, err := json.Marshal(result)
+	// result.Issues are raw *github.Issue objects marshaled directly below rather than through
+	// a convertToMinimal* helper (see minimal_types.go), so Title/Body must be sanitized here.
+	for _, iss := range result.Issues {
+		sanitizeIssueTitleAndBody(iss)
+	}
+
+	filtered := false
+	var payload any = result
+	if len(cfg.fields) > 0 {
+		filteredItems, err := filterEachField(result.Issues, cfg.fields)
+		if err != nil {
+			return utils.NewToolResultErrorFromErr(errorPrefix+": failed to filter results", err), nil
+		}
+		payload = map[string]any{
+			"total_count":        result.Total,
+			"incomplete_results": result.IncompleteResults,
+			"items":              filteredItems,
+		}
+		filtered = true
+	}
+
+	r, err := json.Marshal(payload)
 	if err != nil {
 		return utils.NewToolResultErrorFromErr(errorPrefix+": failed to marshal response", err), nil
+	}
+
+	if cfg.fieldsTool != "" {
+		recordFieldsUsageFor(ctx, cfg.fieldsDeps, cfg.fieldsTool, result, filtered, len(r))
 	}
 
 	callResult := utils.NewToolResultText(string(r))

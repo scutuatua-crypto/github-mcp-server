@@ -1,19 +1,19 @@
 {
   "annotations": {
+    "idempotentHint": false,
     "readOnlyHint": true,
     "title": "List dependabot alerts"
   },
   "description": "List dependabot alerts in a GitHub repository.",
   "inputSchema": {
     "properties": {
+      "after": {
+        "description": "Cursor for pagination. Use the cursor from the previous response.",
+        "type": "string"
+      },
       "owner": {
         "description": "The owner of the repository.",
         "type": "string"
-      },
-      "page": {
-        "description": "Page number for pagination (min 1)",
-        "minimum": 1,
-        "type": "number"
       },
       "perPage": {
         "description": "Results per page for pagination (min 1, max 100)",
